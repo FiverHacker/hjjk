@@ -131,24 +131,57 @@ MINER_PATTERNS = [
 DOCKERFILE_TEMPLATE = """
 FROM {base_image}
 ENV DEBIAN_FRONTEND=noninteractive
+# Install basic packages and SSH server
 RUN apt-get update && \\
-    apt-get install -y systemd systemd-sysv dbus sudo \\
-                       curl gnupg2 apt-transport-https ca-certificates \\
-                       software-properties-common \\
-                       docker.io openssh-server tmate && \\
+    apt-get install -y curl gnupg2 apt-transport-https ca-certificates \\
+                       software-properties-common openssh-server tmate sudo \\
+                       dbus dbus-user-session 2>/dev/null || true && \\
     apt-get clean && rm -rf /var/lib/apt/lists/*
-RUN mkdir /var/run/sshd && \\
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \\
-    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-RUN systemctl enable ssh && \\
-    systemctl enable docker
+
+# Try to install systemd (optional, may fail in some environments)
+RUN apt-get update && \\
+    (apt-get install -y systemd systemd-sysv 2>/dev/null || echo "systemd installation skipped") && \\
+    apt-get clean && rm -rf /var/lib/apt/lists/* || true
+
+# Configure SSH
+RUN mkdir -p /var/run/sshd && \\
+    chmod 755 /var/run/sshd && \\
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || \\
+    sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true && \\
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || \\
+    sed -i 's/#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || \\
+    sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true && \\
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \\
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+
+# Generate SSH host keys if they don't exist
+RUN ssh-keygen -A 2>/dev/null || true
+
+# Try to enable services (will work if systemd is available)
+RUN (systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true) && \\
+    (systemctl enable docker 2>/dev/null || true) || true
+
+# Install additional tools
 RUN apt-get update && \\
     apt-get install -y neofetch htop nano vim wget git tmux net-tools dnsutils iputils-ping ufw \\
-                       fail2ban nmap iotop btop wireguard openvpn zabbix-agent glances iftop tcpdump samba apache2 prometheus clamav sysbench && \\
+                       fail2ban nmap iotop btop wireguard openvpn zabbix-agent glances iftop tcpdump samba apache2 prometheus-node-exporter sysbench \\
+                       2>/dev/null || \\
+    apt-get install -y neofetch htop nano vim wget git tmux net-tools dnsutils iputils-ping ufw \\
+                       fail2ban nmap 2>/dev/null || true && \\
     apt-get clean && \\
     rm -rf /var/lib/apt/lists/*
-STOPSIGNAL SIGRTMIN+3
-CMD ["/sbin/init"]
+
+# Create startup script for SSH
+RUN echo '#!/bin/bash' > /start.sh && \\
+    echo 'mkdir -p /var/run/sshd' >> /start.sh && \\
+    echo 'chmod 755 /var/run/sshd' >> /start.sh && \\
+    echo 'if [ -f /usr/local/bin/start-ssh.sh ]; then /usr/local/bin/start-ssh.sh; fi' >> /start.sh && \\
+    echo 'if [ -f /usr/sbin/sshd ]; then /usr/sbin/sshd -D & fi' >> /start.sh && \\
+    echo 'exec "$@"' >> /start.sh && \\
+    chmod +x /start.sh
+
+# Use init if systemd is available, otherwise use bash
+CMD ["/bin/bash", "-c", "mkdir -p /var/run/sshd && chmod 755 /var/run/sshd && /usr/sbin/sshd -D & tail -f /dev/null"]
 """
 
 app = Flask(__name__, template_folder=os.path.abspath('.'))
